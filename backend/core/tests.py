@@ -1,7 +1,10 @@
 from datetime import timedelta
+from unittest.mock import patch
 from asgiref.sync import async_to_sync
 from channels.testing import WebsocketCommunicator
 from django.contrib.auth.models import User
+from django.contrib.auth.hashers import check_password
+from django.core.cache import cache
 from django.core import mail
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
@@ -25,6 +28,122 @@ class ConnectXAPITests(APITestCase):
         self.assertEqual(response.status_code, 201, response.data)
         return response.data
 
+    def test_meeting_creation_validates_required_fields_before_writing(self):
+        initial_count = Meeting.objects.count()
+        missing_name = self.host_client.post("/api/meetings/", {"title": "   "}, format="json")
+        self.assertEqual(missing_name.status_code, 400)
+        self.assertIn("title", missing_name.data)
+        self.assertIn("Meeting name is required.", str(missing_name.data["title"]))
+
+        missing_date = self.host_client.post("/api/meetings/", {"title": "Planning", "scheduled": True}, format="json")
+        self.assertEqual(missing_date.status_code, 400)
+        self.assertIn("scheduled_at", missing_date.data)
+        self.assertIn("Date & time is required", str(missing_date.data["scheduled_at"]))
+
+        invalid_date = self.host_client.post("/api/meetings/", {
+            "title": "Planning", "scheduled": True, "scheduled_at": "not-a-date"
+        }, format="json")
+        self.assertEqual(invalid_date.status_code, 400)
+        self.assertIn("scheduled_at", invalid_date.data)
+
+        past_date = self.host_client.post("/api/meetings/", {
+            "title": "Planning", "scheduled": True, "scheduled_at": (timezone.now() - timedelta(minutes=1)).isoformat()
+        }, format="json")
+        self.assertEqual(past_date.status_code, 400)
+        self.assertIn("Choose a future date and time.", str(past_date.data["scheduled_at"]))
+        self.assertEqual(Meeting.objects.count(), initial_count)
+
+    def test_scheduled_meeting_persists_options_and_appears_in_meeting_list(self):
+        starts_at = timezone.now() + timedelta(days=2)
+        response = self.host_client.post("/api/meetings/", {
+            "title": "  Product planning  ",
+            "description": "Review launch milestones.",
+            "external_url": "https://meet.google.com/abc-defg-hij",
+            "password": "planning-secret",
+            "waiting_room": True,
+            "scheduled": True,
+            "scheduled_at": starts_at.isoformat(),
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data["title"], "Product planning")
+        self.assertEqual(response.data["status"], Meeting.Status.SCHEDULED)
+        self.assertTrue(response.data["waiting_room"])
+        self.assertTrue(response.data["has_password"])
+
+        saved = Meeting.objects.get(pk=response.data["id"])
+        self.assertEqual(saved.description, "Review launch milestones.")
+        self.assertEqual(saved.external_url, "https://meet.google.com/abc-defg-hij")
+        self.assertEqual(saved.scheduled_at, starts_at)
+        self.assertTrue(check_password("planning-secret", saved.password_hash))
+        self.assertIsNone(saved.started_at)
+        self.assertTrue(MeetingParticipant.objects.filter(meeting=saved, user=self.host, role=MeetingParticipant.Role.HOST).exists())
+
+        listed = self.host_client.get("/api/meetings/")
+        self.assertEqual(listed.status_code, 200)
+        self.assertTrue(any(row["id"] == response.data["id"] for row in listed.data))
+
+    def test_instant_meeting_is_created_live_with_optional_fields_defaulted(self):
+        response = self.host_client.post("/api/meetings/", {
+            "title": "Instant team sync", "scheduled": False, "scheduled_at": None,
+            "description": "", "external_url": "", "password": "", "waiting_room": False,
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data["status"], Meeting.Status.LIVE)
+        self.assertFalse(response.data["waiting_room"])
+        self.assertFalse(response.data["has_password"])
+        saved = Meeting.objects.get(pk=response.data["id"])
+        self.assertIsNone(saved.scheduled_at)
+        self.assertIsNotNone(saved.started_at)
+        self.assertEqual(saved.external_url, "")
+        self.assertTrue(MeetingParticipant.objects.filter(meeting=saved, user=self.host, state=MeetingParticipant.State.ACTIVE).exists())
+
+    def test_live_translation_requires_provider_configuration_and_host_permission(self):
+        meeting = self.create_meeting()
+        with override_settings(AZURE_SPEECH_KEY="", AZURE_SPEECH_REGION=""):
+            missing_provider = self.host_client.patch(f"/api/meetings/{meeting['id']}/", {
+                "translation_enabled": True,
+            }, format="json")
+        self.assertEqual(missing_provider.status_code, 503)
+        self.assertFalse(Meeting.objects.get(pk=meeting["id"]).translation_enabled)
+
+        with override_settings(AZURE_SPEECH_KEY="speech-test-key", AZURE_SPEECH_REGION="eastus"):
+            forbidden = self.guest_client.patch(f"/api/meetings/{meeting['id']}/", {
+                "translation_enabled": True,
+            }, format="json")
+            self.assertEqual(forbidden.status_code, 403)
+            invalid_language = self.host_client.patch(f"/api/meetings/{meeting['id']}/", {
+                "translation_source_language": "unsupported-locale",
+            }, format="json")
+            self.assertEqual(invalid_language.status_code, 400)
+            enabled = self.host_client.patch(f"/api/meetings/{meeting['id']}/", {
+                "translation_enabled": True, "translation_source_language": "ur-PK",
+            }, format="json")
+            self.assertEqual(enabled.status_code, 200, enabled.data)
+            self.assertTrue(enabled.data["translation_enabled"])
+            self.assertEqual(enabled.data["translation_source_language"], "ur-PK")
+
+    def test_translation_token_is_short_lived_server_minted_and_requires_active_member(self):
+        meeting = self.create_meeting()
+        disabled = self.host_client.post(f"/api/meetings/{meeting['id']}/translation-token/")
+        self.assertEqual(disabled.status_code, 409)
+
+        with override_settings(AZURE_SPEECH_KEY="speech-test-key", AZURE_SPEECH_REGION="testtranslationregion"):
+            self.host_client.patch(f"/api/meetings/{meeting['id']}/", {
+                "translation_enabled": True,
+            }, format="json")
+            guest = self.guest_client.post(f"/api/meetings/{meeting['id']}/translation-token/")
+            self.assertEqual(guest.status_code, 403)
+
+            cache.delete("azure-speech-token:testtranslationregion")
+            with patch("core.views.cache.set") as cache_set, patch("core.views.urlopen") as urlopen:
+                urlopen.return_value.__enter__.return_value.read.return_value = b"short-lived-speech-token"
+                response = self.host_client.post(f"/api/meetings/{meeting['id']}/translation-token/")
+            self.assertEqual(response.status_code, 200, response.data)
+            self.assertEqual(response.data, {"authorization_token": "short-lived-speech-token", "region": "testtranslationregion"})
+            self.assertEqual(urlopen.call_args.args[0].full_url, "https://testtranslationregion.api.cognitive.microsoft.com/sts/v1.0/issueToken")
+            self.assertEqual(urlopen.call_args.args[0].get_header("Ocp-apim-subscription-key"), "speech-test-key")
+            self.assertEqual(cache_set.call_args.kwargs["timeout"], 8 * 60)
+
     def test_registration_and_email_login(self):
         response = self.client.post("/api/auth/register/", {"name": "Taylor Reed", "username": "taylor", "email": "TAYLOR@example.test", "password": "Taylor-Long-Unique-348!"}, format="json")
         self.assertEqual(response.status_code, 201, response.data)
@@ -33,6 +152,22 @@ class ConnectXAPITests(APITestCase):
         login = self.client.post("/api/auth/login/", {"username": "taylor@example.test", "password": "Taylor-Long-Unique-348!"}, format="json")
         self.assertEqual(login.status_code, 200, login.data)
         self.assertEqual(login.data["user"]["username"], "taylor")
+
+    def test_rotating_refresh_tokens_keep_the_session_valid(self):
+        login = self.client.post("/api/auth/login/", {
+            "username": "host", "password": "StrongPassphrase!345"
+        }, format="json")
+        self.assertEqual(login.status_code, 200, login.data)
+        first_refresh = login.data["refresh"]
+
+        refreshed = self.client.post("/api/auth/refresh/", {"refresh": first_refresh}, format="json")
+        self.assertEqual(refreshed.status_code, 200, refreshed.data)
+        self.assertNotEqual(refreshed.data["refresh"], first_refresh)
+        self.assertTrue(refreshed.data["access"])
+
+        refreshed_again = self.client.post("/api/auth/refresh/", {"refresh": refreshed.data["refresh"]}, format="json")
+        self.assertEqual(refreshed_again.status_code, 200, refreshed_again.data)
+        self.assertTrue(refreshed_again.data["access"])
 
     @override_settings(LIVEKIT_URL="", LIVEKIT_API_KEY="", LIVEKIT_API_SECRET="")
     def test_meeting_id_join_chat_permissions_and_history(self):
@@ -181,3 +316,39 @@ class MeetingWebSocketTests(TransactionTestCase):
 
         async_to_sync(exchange)()
         self.assertTrue(MeetingMessage.objects.filter(meeting=meeting, text="Real-time hello").exists())
+
+    def test_only_host_can_broadcast_live_translation_captions(self):
+        host = User.objects.create_user(username="translationhost", password="LongTranslationHostPassphrase!456")
+        guest = User.objects.create_user(username="translationguest", password="LongTranslationGuestPassphrase!456")
+        meeting = Meeting.objects.create(host=host, title="Translation check", status="live", started_at=timezone.now(), translation_enabled=True, translation_source_language="ur-PK")
+        MeetingParticipant.objects.create(meeting=meeting, user=host, role="host", state="active", joined_at=timezone.now())
+        MeetingParticipant.objects.create(meeting=meeting, user=guest, state="active", joined_at=timezone.now())
+        host_token = str(RefreshToken.for_user(host).access_token)
+        guest_token = str(RefreshToken.for_user(guest).access_token)
+
+        async def exchange():
+            guest_socket = WebsocketCommunicator(application, f"/ws/meetings/{meeting.id}/", headers=[(b"origin", b"http://localhost:5173")], subprotocols=["connectx-auth", guest_token])
+            connected, _ = await guest_socket.connect()
+            self.assertTrue(connected)
+            await guest_socket.receive_json_from()
+            await guest_socket.send_json_to({
+                "event": "translation_caption", "source_language": "ur-PK", "source_text": "سلام",
+                "translations": {"en": "Hello"}, "final": True,
+            })
+            self.assertTrue(await guest_socket.receive_nothing(timeout=0.05))
+            await guest_socket.disconnect()
+
+            host_socket = WebsocketCommunicator(application, f"/ws/meetings/{meeting.id}/", headers=[(b"origin", b"http://localhost:5173")], subprotocols=["connectx-auth", host_token])
+            connected, _ = await host_socket.connect()
+            self.assertTrue(connected)
+            await host_socket.receive_json_from()
+            await host_socket.send_json_to({
+                "event": "translation_caption", "caption_id": "caption-1", "source_language": "ur-PK",
+                "source_text": "سلام", "translations": {"en": "Hello", "zh-Hans": "你好"}, "final": True,
+            })
+            caption = await host_socket.receive_json_from()
+            self.assertEqual(caption["event"], "translation_caption")
+            self.assertEqual(caption["translations"], {"en": "Hello", "zh-Hans": "你好"})
+            await host_socket.disconnect()
+
+        async_to_sync(exchange)()

@@ -22,6 +22,23 @@ class UserProfile(models.Model):
     def __str__(self): return self.user.username
 
 class Meeting(models.Model):
+    TRANSLATION_SOURCE_LANGUAGES = (
+        ("en-US", "English (United States)"),
+        ("ur-PK", "Urdu (Pakistan)"),
+        ("zh-CN", "Chinese (Mandarin)"),
+        ("ar-SA", "Arabic"),
+        ("hi-IN", "Hindi"),
+        ("fr-FR", "French"),
+        ("es-ES", "Spanish"),
+        ("de-DE", "German"),
+        ("ja-JP", "Japanese"),
+        ("pt-BR", "Portuguese (Brazil)"),
+    )
+    TRANSLATION_TARGET_LANGUAGES = (
+        ("en", "English"), ("ur", "Urdu"), ("zh-Hans", "Chinese (Simplified)"),
+        ("ar", "Arabic"), ("hi", "Hindi"), ("fr", "French"), ("es", "Spanish"),
+        ("de", "German"), ("ja", "Japanese"), ("pt", "Portuguese"),
+    )
     class Status(models.TextChoices):
         SCHEDULED = "scheduled", "Scheduled"
         LIVE = "live", "Live"
@@ -39,6 +56,8 @@ class Meeting(models.Model):
     ended_at = models.DateTimeField(null=True, blank=True)
     password_hash = models.CharField(max_length=128, blank=True)
     waiting_room = models.BooleanField(default=False)
+    translation_enabled = models.BooleanField(default=False, db_default=False)
+    translation_source_language = models.CharField(max_length=12, choices=TRANSLATION_SOURCE_LANGUAGES, default="en-US", db_default="en-US")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     class Meta:

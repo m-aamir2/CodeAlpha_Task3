@@ -44,3 +44,46 @@ html[data-theme="dark"] .pdf-preview-modal{background:#1a2432;border-color:#303b
 html[data-theme="dark"] .pdf-preview-modal>header{border-color:#303b4a}
 html[data-theme="dark"] .pdf-preview-modal>header b{color:#e1e6ee}
 @media(max-width:700px){.pdf-preview-modal{height:94vh;border-radius:9px}.pdf-preview-modal>header{padding:8px}.pdf-preview-modal>header .text-link{font-size:9px;white-space:nowrap}}
+
+/* Shared connection and accessibility polish */
+.connection-status{display:inline-flex;align-items:center;gap:7px;min-height:29px;padding:0 10px;border:1px solid #e6e9ef;border-radius:999px;background:#fff;color:#647084;font-size:10px;font-weight:650;white-space:nowrap}
+.connection-status i,.room-connection-state i{width:7px;height:7px;flex:none;border-radius:50%;background:#9aa3b2}
+.connection-connected i,.room-connection-connected i{background:#2cab7a;box-shadow:0 0 0 3px #2cab7a1d}
+.connection-connecting i,.connection-reconnecting i,.room-connection-connecting i,.room-connection-reconnecting i,.room-connection-signalReconnecting i{background:#d79b32;box-shadow:0 0 0 3px #d79b321a;animation:connection-pulse 1.6s ease-in-out infinite}
+.connection-offline i,.room-connection-disconnected i{background:#d55b65;box-shadow:0 0 0 3px #d55b6518}
+.room-connection-state{display:inline-flex;align-items:center;gap:6px;margin:0 4px;color:#b9c5d5;font-size:9px;font-weight:600;letter-spacing:0;text-transform:none}
+.toast-stack{z-index:100}
+.toast{box-shadow:0 12px 35px #151b2b20;backdrop-filter:blur(12px)}
+:where(button,a,input,select,textarea,[tabindex]):focus-visible{outline:3px solid #8178f0;outline-offset:2px}
+input:disabled,select:disabled,textarea:disabled{cursor:not-allowed;opacity:.65}
+@keyframes connection-pulse{50%{box-shadow:0 0 0 5px #d79b3208}}
+html[data-theme="dark"] .connection-status{border-color:#344154;background:#202c3c;color:#d7dfeb}
+@media(max-width:700px){.connection-status{width:28px;min-width:28px;height:28px;min-height:28px;justify-content:center;padding:0}.connection-status>span{display:none}.room-connection-state{font-size:8px;gap:4px}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
+
+/* Per-listener live meeting translation */
+.translation-panel{min-height:0;overflow:auto;flex:1;padding:15px;color:#dce3ed}
+.translation-panel-intro{display:flex;align-items:flex-start;gap:10px;margin:0 0 15px;padding:12px;border:1px solid #2d3948;border-radius:10px;background:#1d2937}
+.translation-panel-icon{height:33px;width:33px;flex:none;display:grid;place-items:center;border-radius:9px;background:#554fd433;color:#aaa4ff}
+.translation-panel-intro>div{display:grid;gap:4px}.translation-panel-intro b{font-size:11px}.translation-panel-intro small{font-size:9px;line-height:1.5;color:#99a6b6}
+.translation-admin-settings,.translation-listener-settings{display:grid;gap:12px;padding:13px 0;border-bottom:1px solid #2c3745}
+.translation-panel label{display:grid;gap:6px;color:#aeb8c6;font-size:9px;font-weight:600}
+.translation-panel select{width:100%;height:34px;padding:0 9px;border:1px solid #394658;border-radius:7px;background:#1b2735;color:#e6ebf2;font-size:10px;outline:none}
+.translation-panel select:focus{border-color:#8279ff;box-shadow:0 0 0 2px #8279ff2c}
+.translation-setting-row{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.translation-setting-row>div{display:grid;gap:4px}.translation-setting-row b{display:flex;align-items:center;gap:6px;color:#dce3ed;font-size:9px}.translation-setting-row small{color:#8997a9;font-size:8px;line-height:1.45}
+.translation-toggle{width:32px;height:19px;flex:none;padding:2px;border:1px solid #495567;border-radius:999px;background:#303b4b;transition:background .15s,border-color .15s}
+.translation-toggle i{display:block;width:13px;height:13px;border-radius:50%;background:#d6dce5;transition:transform .15s}
+.translation-toggle-on{border-color:#6b63e8;background:#6259df}.translation-toggle-on i{transform:translateX(12px);background:#fff}
+.translation-audio-button{height:35px;display:flex;align-items:center;justify-content:center;gap:7px;border:1px solid #4a5271;border-radius:8px;background:#302e56;color:#d4d1ff;font-size:9px;font-weight:650}
+.translation-audio-button:hover:not(:disabled){background:#3d396f}.translation-audio-button.translation-audio-on{border-color:#4b987d;background:#173f36;color:#a9eed6}
+.translation-spin{animation:translation-spin .9s linear infinite}@keyframes translation-spin{to{transform:rotate(360deg)}}
+.translation-status{display:flex;align-items:center;gap:7px;margin:13px 0 0;color:#9ba7b7;font-size:9px}
+.translation-status i{width:7px;height:7px;border-radius:50%;background:#778496}.translation-status-live i{background:#54d4a5;box-shadow:0 0 0 3px #54d4a51c}.translation-status-starting i{background:#dfb15f;animation:connection-pulse 1.5s infinite}.translation-status-error i{background:#ed747e}
+.translation-error{margin:9px 0 0;padding:9px;border:1px solid #82414a;border-radius:7px;background:#512b32;color:#ffc6c8;font-size:9px;line-height:1.5}
+.translation-privacy,.translation-language-note{margin:12px 0 0;color:#758396;font-size:8px;line-height:1.55}
+.translation-not-ready{display:grid;gap:5px;margin:10px 0;padding:11px;border:1px solid #394453;border-radius:8px;background:#202a37}.translation-not-ready b{font-size:9px}.translation-not-ready span{color:#99a5b4;font-size:8px;line-height:1.5}
+.translation-subtitle{position:absolute;z-index:6;left:50%;bottom:20px;width:min(82%,720px);display:grid;justify-items:center;gap:5px;transform:translateX(-50%);padding:9px 15px;border:1px solid #ffffff24;border-radius:10px;background:#10151dcc;backdrop-filter:blur(10px);text-align:center;pointer-events:none}
+.translation-subtitle>span{display:flex;align-items:center;gap:5px;color:#ccd3df;font-size:8px;font-weight:650;letter-spacing:.05em;text-transform:uppercase}
+.translation-subtitle>b{color:white;font-size:clamp(13px,1.6vw,19px);font-weight:600;line-height:1.4;text-wrap:balance}
+@media(max-width:700px){.translation-panel{padding:12px}.translation-subtitle{bottom:10px;width:92%;padding:7px 10px}.translation-subtitle>b{font-size:12px}}

@@ -2,7 +2,7 @@ import json
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 from django.utils import timezone
-from .models import MeetingMessage, MeetingParticipant, WhiteboardSnapshot
+from .models import Meeting, MeetingMessage, MeetingParticipant, WhiteboardSnapshot
 from .notifications import notify
 from .serializers import user_data
 
@@ -25,6 +25,13 @@ def persist_message(meeting_id, user, text):
 def persist_board(meeting_id, user, state):
     board, _ = WhiteboardSnapshot.objects.update_or_create(meeting_id=meeting_id, defaults={"state": state, "updated_by": user})
     return board.updated_at.isoformat()
+
+@database_sync_to_async
+def translation_speaker_allowed(meeting_id, user_id, source_language):
+    return Meeting.objects.filter(
+        pk=meeting_id, host_id=user_id, translation_enabled=True,
+        translation_source_language=source_language,
+    ).exists()
 
 class MeetingConsumer(AsyncJsonWebsocketConsumer):
     async def connect(self):
@@ -73,6 +80,40 @@ class MeetingConsumer(AsyncJsonWebsocketConsumer):
             if changed:
                 await self._save_status(changed)
                 await self.channel_layer.group_send(self.group_name, {"type": "meeting.event", "payload": {"event": event, "user_id": self.user.id, "status": changed}})
+        elif event == "translation_caption":
+            source_language = str(content.get("source_language", ""))
+            if not await translation_speaker_allowed(self.meeting_id, self.user.id, source_language): return
+            source_text = str(content.get("source_text", "")).strip()[:1000]
+            translations = content.get("translations")
+            if not source_text or not isinstance(translations, dict) or len(translations) > 10: return
+            allowed_targets = dict(Meeting.TRANSLATION_TARGET_LANGUAGES)
+            clean_translations = {
+                language: str(value).strip()[:1000]
+                for language, value in translations.items()
+                if language in allowed_targets and isinstance(value, str) and value.strip()
+            }
+            if not clean_translations: return
+            await self.channel_layer.group_send(self.group_name, {
+                "type": "meeting.event",
+                "payload": {
+                    "event": event,
+                    "caption_id": str(content.get("caption_id", ""))[:80],
+                    "source_language": source_language,
+                    "source_text": source_text,
+                    "translations": clean_translations,
+                    "final": bool(content.get("final", False)),
+                    "created_at": timezone.now().isoformat(),
+                },
+            })
+        elif event == "translation_status":
+            status = str(content.get("status", ""))
+            source_language = str(content.get("source_language", ""))
+            if status not in ("starting", "live", "error", "stopped"): return
+            if not await translation_speaker_allowed(self.meeting_id, self.user.id, source_language): return
+            await self.channel_layer.group_send(self.group_name, {
+                "type": "meeting.event",
+                "payload": {"event": event, "status": status, "detail": str(content.get("detail", ""))[:240]},
+            })
 
     @database_sync_to_async
     def _save_status(self, changed):

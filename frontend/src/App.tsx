@@ -1,5 +1,5 @@
 import { lazy, Suspense } from 'react'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClientProvider } from '@tanstack/react-query'
 import { BrowserRouter, Navigate, Outlet, Route, Routes } from 'react-router-dom'
 import { AppLayout } from './components/AppLayout'
 import { AuthPage, ForgotPasswordPage, ResetPasswordPage } from './pages/AuthPages'
@@ -7,9 +7,9 @@ import { DashboardPage, MeetingsPage, NotificationsPage, SettingsPage } from './
 import { MeetingDetailPage } from './pages/MeetingDetailPage'
 import { JoinPage } from './pages/JoinPage'
 import { useAuthStore } from './store/auth'
+import { queryClient } from './services/queryClient'
 
 const MeetingRoomPage=lazy(()=>import('./pages/MeetingRoomPage').then((module)=>({default:module.MeetingRoomPage})))
-const queryClient = new QueryClient({ defaultOptions: { queries: { retry: 1, staleTime: 15_000, refetchOnWindowFocus: false } } })
 function Protected() { const access = useAuthStore((state) => state.access); return access ? <Outlet /> : <Navigate to="/login" replace /> }
 function Application() {
   return <QueryClientProvider client={queryClient}><BrowserRouter><Routes>

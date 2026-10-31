@@ -7,15 +7,57 @@ import { authApi, userApi } from '../services/api'
 import { useAuthStore } from '../store/auth'
 import { Avatar, ToastHost } from './ui'
 import { toast } from '../utils/ui'
+import { errorStatus } from '../services/errors'
 
 export function AppLayout(){
   const [open,setOpen]=useState(false);const nav=useNavigate();const qc=useQueryClient();const storeUser=useAuthStore(s=>s.user);const access=useAuthStore(s=>s.access);const setUser=useAuthStore(s=>s.setUser)
+  const [connection,setConnection]=useState<'connecting'|'connected'|'reconnecting'|'offline'>('connecting')
   const [theme,setTheme]=useState<'light'|'dark'>(()=>localStorage.getItem('connectx-theme')==='dark'?'dark':'light')
   useEffect(()=>{document.documentElement.dataset.theme=theme;localStorage.setItem('connectx-theme',theme)},[theme])
   const me=useQuery({queryKey:['me'],queryFn:authApi.me});useEffect(()=>{if(me.data)setUser(me.data)},[me.data,setUser])
-  useEffect(()=>{if(!access)return;const timer=window.setInterval(()=>{void authApi.refreshSession().catch(()=>useAuthStore.getState().clear())},10*60*1000);return()=>window.clearInterval(timer)},[access])
+  useEffect(()=>{if(!access)return;let active=true;let retry:number|undefined;const refresh=async()=>{try{await authApi.refreshSession()}catch(error){if(!active)return;if(errorStatus(error)===401){useAuthStore.getState().clear();return}retry=window.setTimeout(()=>void refresh(),30_000)}};const timer=window.setInterval(()=>void refresh(),10*60*1000);return()=>{active=false;window.clearInterval(timer);if(retry)window.clearTimeout(retry)}},[access])
   const notices=useQuery({queryKey:['notifications'],queryFn:userApi.notifications,refetchInterval:30000})
-  useEffect(()=>{if(!access)return;let socket:WebSocket|undefined;let alive=true;let retry:number|undefined;const connect=()=>{if(!alive)return;const api=(import.meta.env.VITE_API_URL||'http://localhost:8000/api').replace(/\/$/,'');const base=(import.meta.env.VITE_WS_URL||api.replace(/^http/,'ws').replace(/\/api$/,'')).replace(/\/$/,'');socket=new WebSocket(`${base}/ws/notifications/`,['connectx-auth',access]);socket.onmessage=e=>{try{const n=JSON.parse(e.data);void qc.invalidateQueries({queryKey:['notifications']});toast(n.title||'New notification','info')}catch{/* Ignore malformed events. */}};socket.onclose=()=>{if(alive)retry=window.setTimeout(connect,2500)}};connect();return()=>{alive=false;if(retry)window.clearTimeout(retry);socket?.close()}},[access,qc])
+  useEffect(()=>{
+    let socket:WebSocket|undefined
+    let alive=true
+    let retry:number|undefined
+    let attempts=0
+    const schedule=(delay?:number)=>{
+      if(!alive)return
+      setConnection(navigator.onLine?'reconnecting':'offline')
+      const wait=delay??Math.min(1000*2**Math.min(attempts++,5),30_000)
+      retry=window.setTimeout(connect,wait)
+    }
+    const connect=()=>{
+      if(!alive)return
+      const token=useAuthStore.getState().access
+      if(!token||!navigator.onLine){setConnection('offline');return}
+      setConnection(attempts?'reconnecting':'connecting')
+      const apiUrl=(import.meta.env.VITE_API_URL||'http://localhost:8000/api').replace(/\/$/,'')
+      const base=(import.meta.env.VITE_WS_URL||apiUrl.replace(/^http/,'ws').replace(/\/api$/,'')).replace(/\/$/,'')
+      let next:WebSocket
+      try{next=new WebSocket(`${base}/ws/notifications/`,['connectx-auth',token])}catch{schedule();return}
+      socket=next
+      next.onopen=()=>{if(alive&&socket===next){attempts=0;setConnection('connected')}}
+      next.onmessage=e=>{try{const notice=JSON.parse(e.data);void qc.invalidateQueries({queryKey:['notifications']});toast(notice.title||'New notification','info')}catch{/* Ignore malformed events. */}}
+      next.onclose=event=>{
+        if(!alive||socket!==next)return
+        socket=undefined
+        if(event.code===4401){
+          setConnection('reconnecting')
+          retry=window.setTimeout(()=>{void authApi.refreshSession().catch(()=>{}).finally(()=>schedule(200))},500)
+          return
+        }
+        schedule()
+      }
+    }
+    const onOnline=()=>{if(retry)window.clearTimeout(retry);attempts=0;connect()}
+    const onOffline=()=>{setConnection('offline');const current=socket;socket=undefined;current?.close()}
+    window.addEventListener('online',onOnline)
+    window.addEventListener('offline',onOffline)
+    connect()
+    return()=>{alive=false;window.removeEventListener('online',onOnline);window.removeEventListener('offline',onOffline);if(retry)window.clearTimeout(retry);socket?.close()}
+  },[qc])
   const user=me.data||storeUser
   const signOut=async()=>{try{await authApi.logout()}finally{nav('/login')}}
   return <div className="app-shell"><aside className={`sidebar ${open?'sidebar-open':''}`}>
@@ -24,6 +66,6 @@ export function AppLayout(){
     <nav className="side-nav"><div className="nav-label">WORKSPACE</div><NavLink to="/app" end><LayoutDashboard/><span>Overview</span></NavLink><NavLink to="/app/meetings"><CalendarDays/><span>Meetings</span></NavLink><NavLink to="/app/notifications"><Bell/><span>Notifications</span>{(notices.data?.unread||0)>0&&<i className="nav-count">{notices.data?.unread}</i>}</NavLink><NavLink to="/app/settings"><Settings/><span>Settings</span></NavLink></nav>
     <div className="side-spacer"/><div className="sidebar-help"><div className="help-icon"><CircleHelp size={18}/></div><b>Need a hand?</b><span>Explore tips to get the best out of ConnectX.</span><button onClick={()=>window.open('https://docs.livekit.io/','_blank','noopener,noreferrer')}>Visit help center <span>↗</span></button></div>
     <div className="sidebar-user"><Avatar user={user} size="md"/><div><b>{user?.name||'Your account'}</b><span>{user?.email||'Loading profile…'}</span></div><button className="icon-btn" aria-label="Sign out" title="Sign out" onClick={signOut}><LogOut size={17}/></button></div>
-  </aside><main className="main-column"><div className="topbar"><button className="mobile-menu icon-btn" onClick={()=>setOpen(true)}><Menu/></button><div className="breadcrumb"><span>Workspace</span><span className="crumb-slash">/</span><b>ConnectX</b></div><div className="topbar-right"><button className="search-trigger" onClick={()=>nav('/app/meetings')}><Search size={16}/><span>Search meetings</span><kbd>⌘ K</kbd></button><button className="icon-btn" aria-label={theme==='light'?'Switch to dark theme':'Switch to light theme'} title={theme==='light'?'Switch to dark theme':'Switch to light theme'} onClick={()=>setTheme(theme==='light'?'dark':'light')}>{theme==='light'?<Moon size={17}/>:<Sun size={17}/>}</button><button className="icon-btn" aria-label="Notifications" onClick={()=>nav('/app/notifications')}><Bell size={18}/>{(notices.data?.unread||0)>0&&<i className="bell-dot"/>}</button><span className="topbar-divider"/><button className="profile-trigger" onClick={()=>nav('/app/settings')}><Avatar user={user} size="sm"/><ChevronDown size={14}/></button></div></div><div className="page-content"><Outlet/></div><footer className="app-footer"><span>© 2026 ConnectX</span><span>Built for better conversations <span className="footer-heart">●</span></span><span><Headphones size={14}/> Help & support</span></footer></main><ToastHost/></div>
+  </aside><main className="main-column"><div className="topbar"><button className="mobile-menu icon-btn" onClick={()=>setOpen(true)}><Menu/></button><div className="breadcrumb"><span>Workspace</span><span className="crumb-slash">/</span><b>ConnectX</b></div><div className="topbar-right"><button className="search-trigger" onClick={()=>nav('/app/meetings')}><Search size={16}/><span>Search meetings</span><kbd>⌘ K</kbd></button><div className={`connection-status connection-${connection}`} role="status" aria-live="polite" title="Live notification connection"><i/><span>{connection==='connected'?'Live updates':connection==='connecting'?'Connecting':connection==='offline'?'Offline':'Reconnecting'}</span></div><button className="icon-btn" aria-label={theme==='light'?'Switch to dark theme':'Switch to light theme'} title={theme==='light'?'Switch to dark theme':'Switch to light theme'} onClick={()=>setTheme(theme==='light'?'dark':'light')}>{theme==='light'?<Moon size={17}/>:<Sun size={17}/>}</button><button className="icon-btn" aria-label="Notifications" onClick={()=>nav('/app/notifications')}><Bell size={18}/>{(notices.data?.unread||0)>0&&<i className="bell-dot"/>}</button><span className="topbar-divider"/><button className="profile-trigger" onClick={()=>nav('/app/settings')}><Avatar user={user} size="sm"/><ChevronDown size={14}/></button></div></div><div className="page-content"><Outlet/></div><footer className="app-footer"><span>© 2026 ConnectX</span><span>Built for better conversations <span className="footer-heart">●</span></span><span><Headphones size={14}/> Help & support</span></footer></main><ToastHost/></div>
 }
 

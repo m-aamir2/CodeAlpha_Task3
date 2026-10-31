@@ -3,18 +3,94 @@ import { useAuthStore } from '../store/auth'
 import type { ChatMessage, Meeting, Notice, Participant, SharedFile, User, WhiteboardState } from '../types'
 const API_URL = (import.meta.env.VITE_API_URL || 'http://localhost:8000/api').replace(/\/$/, '')
 export const api = axios.create({ baseURL: API_URL, timeout: 30_000 })
+type StoredSession = {access:string|null;refresh:string|null;user:User|null}
+type RetryableRequest = InternalAxiosRequestConfig & {_retry?:boolean}
+const sessionStorageKey='connectx-session'
+const sessionChannel=typeof BroadcastChannel==='undefined'?null:new BroadcastChannel('connectx-session')
 let refreshTask: Promise<string>|null = null
+
+function readStoredSession():StoredSession|null{
+  try{
+    const parsed=JSON.parse(localStorage.getItem(sessionStorageKey)||'null') as {state?:StoredSession}|null
+    return parsed?.state||null
+  }catch{return null}
+}
+
+sessionChannel?.addEventListener('message',(event:MessageEvent<{type?:string;userId?:number;access?:string;refresh?:string}>)=>{
+  const message=event.data
+  const current=useAuthStore.getState()
+  const user=current.user
+  if(message.type==='session-refreshed'&&message.access&&message.refresh&&user&&user.id===message.userId){
+    current.setSession(message.access,message.refresh,user)
+  }else if(message.type==='session-ended'&&current.user?.id===message.userId){
+    current.clear()
+  }
+})
+if(import.meta.hot)import.meta.hot.dispose(()=>sessionChannel?.close())
+
+function refreshAccessToken(failedAccess?:string,force=false):Promise<string>{
+  if(refreshTask)return refreshTask
+  const starting=useAuthStore.getState()
+  if(!starting.refresh||!starting.user)return Promise.reject(new Error('Your session has expired. Sign in again.'))
+  const startingAccess=starting.access
+  const startingRefresh=starting.refresh
+  const userId=starting.user.id
+
+  const refresh=async()=>{
+    const current=useAuthStore.getState()
+    if(current.user?.id!==userId||!current.refresh)throw new Error('Your session changed. Sign in again.')
+
+    const stored=readStoredSession()
+    if(stored?.access&&stored.refresh&&stored.user?.id===userId){
+      const changedElsewhere=stored.access!==startingAccess||stored.refresh!==startingRefresh
+      if(changedElsewhere){
+        current.setSession(stored.access,stored.refresh,current.user)
+        return stored.access
+      }
+      if(!force&&failedAccess&&stored.access!==failedAccess)return stored.access
+    }
+
+    const refreshToken=current.refresh
+    try{
+      const {data}=await axios.post(`${API_URL}/auth/refresh/`,{refresh:refreshToken},{timeout:15_000})
+      const latest=useAuthStore.getState()
+      if(latest.user?.id!==userId)throw new Error('Your session changed. Sign in again.')
+      if(latest.refresh!==refreshToken&&latest.access)return latest.access
+      latest.setSession(data.access,data.refresh||refreshToken,latest.user)
+      sessionChannel?.postMessage({type:'session-refreshed',userId,access:data.access,refresh:data.refresh||refreshToken})
+      return data.access as string
+    }catch(error){
+      const latest=useAuthStore.getState()
+      if(axios.isAxiosError(error)&&error.response?.status===401&&latest.user?.id===userId&&latest.refresh===refreshToken){
+        latest.clear()
+        sessionChannel?.postMessage({type:'session-ended',userId})
+      }
+      throw error
+    }
+  }
+
+  const coordinated=()=>typeof navigator!=='undefined'&&navigator.locks?.request
+    ?navigator.locks.request('connectx-session-refresh',refresh)
+    :refresh()
+  refreshTask=coordinated().finally(()=>{refreshTask=null})
+  return refreshTask
+}
+
 api.interceptors.request.use((config) => { const token=useAuthStore.getState().access; if(token) config.headers.Authorization=`Bearer ${token}`; return config })
 api.interceptors.response.use((response)=>response, async (error:AxiosError) => {
-  const original = error.config as InternalAxiosRequestConfig & {_retry?:boolean}
-  if(error.response?.status===401 && original && !original._retry && !original.url?.includes('/auth/refresh/')) {
+  const original = error.config as RetryableRequest
+  const noRefresh=['/auth/login/','/auth/register/','/auth/forgot-password/','/auth/reset-password/','/auth/refresh/']
+  if(error.response?.status===401 && original && !original._retry && !noRefresh.some(path=>original.url?.includes(path))) {
     const refresh=useAuthStore.getState().refresh
-    if(!refresh) { useAuthStore.getState().clear(); throw error }
+    if(!refresh) { const userId=useAuthStore.getState().user?.id;useAuthStore.getState().clear();if(userId)sessionChannel?.postMessage({type:'session-ended',userId});throw error }
     original._retry=true
     try {
-      if(!refreshTask) refreshTask=axios.post(`${API_URL}/auth/refresh/`,{refresh}).then(({data})=>{const s=useAuthStore.getState();if(s.user)s.setSession(data.access,data.refresh||refresh,s.user);return data.access}).finally(()=>{refreshTask=null})
-      const access=await refreshTask;original.headers.Authorization=`Bearer ${access}`;return api(original)
-    } catch { useAuthStore.getState().clear(); throw error }
+      const header=String(original.headers?.Authorization||'')
+      const failedAccess=header.replace(/^Bearer\s+/i,'')||undefined
+      const access=await refreshAccessToken(failedAccess)
+      original.headers.Authorization=`Bearer ${access}`
+      return api(original)
+    } catch { throw error }
   }
   throw error
 })
@@ -22,13 +98,15 @@ export const authApi = {
   async login(username:string,password:string){const {data}=await api.post('/auth/login/',{username,password});return data as {access:string;refresh:string;user:User}},
   async register(form:{name:string;username:string;email:string;password:string}){const {data}=await api.post('/auth/register/',form);return data as {access:string;refresh:string;user:User}},
   async me(){const {data}=await api.get('/auth/me/');return data as User},
-  async refreshSession(){const current=useAuthStore.getState();if(!current.refresh||!current.user)throw new Error('Your session has expired.');const {data}=await axios.post(`${API_URL}/auth/refresh/`,{refresh:current.refresh});current.setSession(data.access,data.refresh||current.refresh,current.user)},
-  async logout(){const refresh=useAuthStore.getState().refresh;try{await api.post('/auth/logout/',{refresh})}finally{useAuthStore.getState().clear()}},
+  async refreshSession(){return refreshAccessToken(undefined,true)},
+  async logout(){const current=useAuthStore.getState();const refresh=current.refresh;const userId=current.user?.id;try{if(refresh)await api.post('/auth/logout/',{refresh})}finally{current.clear();if(userId)sessionChannel?.postMessage({type:'session-ended',userId})}},
 }
 export const meetingApi = {
   async list(params?:Record<string,string>){const {data}=await api.get('/meetings/',{params});return data as Meeting[]},
   async create(body:Record<string,unknown>){const {data}=await api.post('/meetings/',body);return data as Meeting},
   async get(id:string){const {data}=await api.get(`/meetings/${id}/`);return data as Meeting},
+  async update(id:string,body:Record<string,unknown>){const {data}=await api.patch(`/meetings/${id}/`,body);return data as Meeting},
+  async translationToken(id:string){const {data}=await api.post(`/meetings/${id}/translation-token/`);return data as {authorization_token:string;region:string}},
   async lookup(code:string){const {data}=await api.get(`/meetings/lookup/${encodeURIComponent(code)}/`);return data as Meeting},
   async join(idOrCode:string,password?:string){const {data}=await api.post(`/meetings/${encodeURIComponent(idOrCode)}/join/`,{password});return data as {waiting:boolean;meeting:Meeting;participant?:Participant}},
   async joinStatus(id:string){const {data}=await api.get(`/meetings/${id}/join/status/`);return data as {state:string;meeting:Meeting}},

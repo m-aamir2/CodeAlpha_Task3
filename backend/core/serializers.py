@@ -4,6 +4,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from rest_framework import serializers
 from urllib.parse import urlsplit
+from django.utils import timezone
 from .models import Meeting, MeetingMessage, MeetingParticipant, Notification, SharedFile, UserProfile
 
 def user_data(user):
@@ -61,7 +62,7 @@ class MeetingSerializer(serializers.ModelSerializer):
     link = serializers.SerializerMethodField()
     class Meta:
         model = Meeting
-        fields = ("id", "code", "host", "title", "description", "external_url", "status", "scheduled_at", "started_at", "ended_at", "duration_seconds", "waiting_room", "has_password", "participant_count", "link", "created_at")
+        fields = ("id", "code", "host", "title", "description", "external_url", "status", "scheduled_at", "started_at", "ended_at", "duration_seconds", "waiting_room", "translation_enabled", "translation_source_language", "has_password", "participant_count", "link", "created_at")
         read_only_fields = ("id", "code", "host", "status", "started_at", "ended_at", "created_at")
     def validate_external_url(self, value):
         value = value.strip()
@@ -82,6 +83,44 @@ class MeetingSerializer(serializers.ModelSerializer):
     def get_link(self, obj):
         origin = settings.FRONTEND_ORIGIN.split(",")[0].rstrip("/")
         return f"{origin}/join/{obj.code}"
+
+class MeetingCreateSerializer(serializers.Serializer):
+    title = serializers.CharField(
+        required=True,
+        allow_blank=False,
+        trim_whitespace=True,
+        max_length=160,
+        error_messages={
+            "required": "Meeting name is required.",
+            "blank": "Meeting name is required.",
+        },
+    )
+    description = serializers.CharField(required=False, allow_blank=True, max_length=2000, default="")
+    external_url = serializers.CharField(required=False, allow_blank=True, max_length=2048, default="")
+    password = serializers.CharField(required=False, allow_blank=True, trim_whitespace=False, max_length=128, default="")
+    waiting_room = serializers.BooleanField(required=False, default=False)
+    scheduled = serializers.BooleanField(required=False, default=False)
+    scheduled_at = serializers.DateTimeField(
+        required=False,
+        allow_null=True,
+        error_messages={"invalid": "Enter a valid date and time."},
+    )
+
+    def validate_external_url(self, value):
+        return MeetingSerializer().validate_external_url(value)
+
+    def validate_password(self, value):
+        if value and len(value) < 4:
+            raise serializers.ValidationError("Password must be at least 4 characters.")
+        return value
+
+    def validate(self, attrs):
+        scheduled_at = attrs.get("scheduled_at")
+        if attrs.get("scheduled") and not scheduled_at:
+            raise serializers.ValidationError({"scheduled_at": "Date & time is required to schedule a meeting."})
+        if scheduled_at and scheduled_at <= timezone.now():
+            raise serializers.ValidationError({"scheduled_at": "Choose a future date and time."})
+        return attrs
 
 class MessageSerializer(serializers.ModelSerializer):
     sender = serializers.SerializerMethodField()

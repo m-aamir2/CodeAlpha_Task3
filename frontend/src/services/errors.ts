@@ -17,6 +17,12 @@ export function errorMessage(error: unknown, fallback: string, field?: string): 
       const messages = Object.values(payload).flatMap(value => Array.isArray(value) ? value : [value]).filter((value): value is string => typeof value === 'string')
       if (messages.length) return messages.join(' ')
     }
+    if (!error.response) {
+      if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') return 'The request timed out. Check your connection and try again.'
+      if (error.code === 'ERR_NETWORK') return 'ConnectX could not reach the server. Check your connection and try again.'
+    }
+    if (error.response?.status === 429) return 'Too many requests. Wait a moment, then try again.'
+    if (error.response && error.response.status >= 500) return 'ConnectX is temporarily unavailable. Your session is still active; please retry shortly.'
     return error.message || fallback
   }
   return error instanceof Error ? error.message || fallback : fallback

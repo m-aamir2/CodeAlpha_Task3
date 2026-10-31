@@ -5,13 +5,17 @@ import codecs
 import zipfile
 from datetime import timedelta
 from uuid import UUID
+from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
 from django.conf import settings
+from django.core.cache import cache
 from django.contrib.auth import authenticate, get_user_model
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.tokens import default_token_generator
 from django.core.exceptions import ValidationError
 from django.core.mail import send_mail
 from django.core.validators import validate_email
+from django.db import transaction
 from django.db.models import Q
 from django.http import FileResponse
 from django.shortcuts import get_object_or_404
@@ -30,7 +34,7 @@ from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from .models import Meeting, MeetingMessage, MeetingParticipant, Notification, SharedFile, UserProfile, WhiteboardSnapshot
 from .notifications import notify
-from .serializers import FileSerializer, MeetingSerializer, MessageSerializer, NotificationSerializer, ParticipantSerializer, ProfileSerializer, RegisterSerializer, user_data
+from .serializers import FileSerializer, MeetingCreateSerializer, MeetingSerializer, MessageSerializer, NotificationSerializer, ParticipantSerializer, ProfileSerializer, RegisterSerializer, user_data
 
 User = get_user_model()
 
@@ -267,30 +271,28 @@ class MeetingListCreateView(APIView):
         if search: qs = qs.filter(Q(title__icontains=search) | Q(code__icontains=search) | Q(description__icontains=search))
         return Response(MeetingSerializer(qs, many=True, context={"request": request}).data)
     def post(self, request):
-        title = str(request.data.get("title", "Untitled meeting")).strip()[:160] or "Untitled meeting"
-        description = str(request.data.get("description", ""))[:2000]
-        external_url = str(request.data.get("external_url", "")).strip()
-        if external_url:
-            serializer = MeetingSerializer(data={"external_url": external_url}, partial=True)
-            if not serializer.is_valid():
-                return Response(serializer.errors, status=400)
-            external_url = serializer.validated_data["external_url"]
-        scheduled_at = request.data.get("scheduled_at") or None
-        if scheduled_at:
-            from django.utils.dateparse import parse_datetime
-            scheduled_at = parse_datetime(str(scheduled_at))
-            if not scheduled_at: return Response({"scheduled_at": ["Enter an ISO 8601 date and time."]}, status=400)
-            if timezone.is_naive(scheduled_at): scheduled_at = timezone.make_aware(scheduled_at)
-        future = bool(scheduled_at and scheduled_at > timezone.now())
-        meeting = Meeting.objects.create(host=request.user, title=title, description=description, external_url=external_url,
-            scheduled_at=scheduled_at, status=Meeting.Status.SCHEDULED if future else Meeting.Status.LIVE,
-            started_at=None if future else timezone.now(), waiting_room=bool(request.data.get("waiting_room", False)))
-        password = str(request.data.get("password", ""))
-        if password:
-            from django.contrib.auth.hashers import make_password
-            meeting.password_hash = make_password(password); meeting.save(update_fields=["password_hash"])
-        MeetingParticipant.objects.create(meeting=meeting, user=request.user, role=MeetingParticipant.Role.HOST,
-            state=MeetingParticipant.State.ACTIVE, joined_at=timezone.now())
+        serializer = MeetingCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=400)
+        values = serializer.validated_data
+        scheduled_at = values.get("scheduled_at")
+        is_scheduled = values.get("scheduled", False) or scheduled_at is not None
+        now = timezone.now()
+        from django.contrib.auth.hashers import make_password
+        with transaction.atomic():
+            meeting = Meeting.objects.create(
+                host=request.user,
+                title=values["title"],
+                description=values["description"],
+                external_url=values["external_url"],
+                scheduled_at=scheduled_at,
+                status=Meeting.Status.SCHEDULED if is_scheduled else Meeting.Status.LIVE,
+                started_at=None if is_scheduled else now,
+                waiting_room=values["waiting_room"],
+                password_hash=make_password(values["password"]) if values["password"] else "",
+            )
+            MeetingParticipant.objects.create(meeting=meeting, user=request.user, role=MeetingParticipant.Role.HOST,
+                state=MeetingParticipant.State.ACTIVE, joined_at=now)
         return Response(MeetingSerializer(meeting, context={"request": request}).data, status=201)
 
 class MeetingDetailView(APIView):
@@ -306,6 +308,22 @@ class MeetingDetailView(APIView):
     def patch(self, request, pk):
         meeting = get_object_or_404(Meeting, pk=pk)
         if meeting.host_id != request.user.id: return Response({"detail": "Only the host can update meeting settings."}, status=403)
+        translation_changed = False
+        if "translation_enabled" in request.data:
+            enabled = request.data["translation_enabled"]
+            if not isinstance(enabled, bool):
+                return Response({"translation_enabled": ["Choose whether live translation is on or off."]}, status=400)
+            if enabled and not (settings.AZURE_SPEECH_KEY and settings.AZURE_SPEECH_REGION):
+                return Response({"detail": "Live translation is not configured. Add AZURE_SPEECH_KEY and AZURE_SPEECH_REGION to .env."}, status=503)
+            meeting.translation_enabled = enabled
+            translation_changed = True
+        if "translation_source_language" in request.data:
+            source_language = request.data["translation_source_language"]
+            allowed_languages = dict(Meeting.TRANSLATION_SOURCE_LANGUAGES)
+            if not isinstance(source_language, str) or source_language not in allowed_languages:
+                return Response({"translation_source_language": ["Choose a supported speaker language."]}, status=400)
+            meeting.translation_source_language = source_language
+            translation_changed = True
         for field in ("title", "description", "waiting_room"):
             if field in request.data: setattr(meeting, field, request.data[field])
         if "external_url" in request.data:
@@ -320,6 +338,11 @@ class MeetingDetailView(APIView):
             from django.contrib.auth.hashers import make_password
             meeting.password_hash = make_password(request.data["password"]) if request.data["password"] else ""
         meeting.save()
+        if translation_changed:
+            broadcast(meeting.id, "translation_settings", {
+                "translation_enabled": meeting.translation_enabled,
+                "translation_source_language": meeting.translation_source_language,
+            })
         return Response(MeetingSerializer(meeting, context={"request": request}).data)
     def delete(self, request, pk):
         meeting = get_object_or_404(Meeting, pk=pk, host=request.user)
@@ -460,6 +483,35 @@ class LiveKitTokenView(APIView):
             return Response({"url": settings.LIVEKIT_URL, "token": token.to_jwt(), "room": str(meeting.id)})
         except Exception:
             return Response({"detail": "Unable to issue a LiveKit token. Check the LiveKit credentials and backend logs."}, status=503)
+
+class MeetingTranslationTokenView(APIView):
+    """Return a short-lived Azure Speech token without exposing the resource key."""
+    def post(self, request, pk):
+        meeting = get_object_or_404(Meeting, pk=pk)
+        if not member(meeting, request.user):
+            return Response({"detail": "Join the meeting before enabling live translation."}, status=403)
+        if not meeting.translation_enabled:
+            return Response({"detail": "The host has not enabled live translation for this meeting."}, status=409)
+        if not (settings.AZURE_SPEECH_KEY and settings.AZURE_SPEECH_REGION):
+            return Response({"detail": "Live translation is not configured. Add AZURE_SPEECH_KEY and AZURE_SPEECH_REGION to .env."}, status=503)
+
+        region = settings.AZURE_SPEECH_REGION.strip().lower()
+        if not region.replace("-", "").isalnum():
+            return Response({"detail": "The Azure Speech region setting is invalid."}, status=503)
+        cache_key = f"azure-speech-token:{region}"
+        token = cache.get(cache_key)
+        if not token:
+            endpoint = f"https://{region}.api.cognitive.microsoft.com/sts/v1.0/issueToken"
+            exchange = Request(endpoint, data=b"", headers={"Ocp-Apim-Subscription-Key": settings.AZURE_SPEECH_KEY}, method="POST")
+            try:
+                with urlopen(exchange, timeout=8) as response:
+                    token = response.read(8192).decode("utf-8").strip()
+                if not token:
+                    return Response({"detail": "Azure Speech returned an empty authorization token."}, status=503)
+                cache.set(cache_key, token, timeout=8 * 60)
+            except (HTTPError, URLError, TimeoutError, OSError):
+                return Response({"detail": "Could not connect to Azure Speech. Check the speech key, region, and network."}, status=503)
+        return Response({"authorization_token": token, "region": region})
 
 class MessageListCreateView(APIView):
     def get(self, request, pk):

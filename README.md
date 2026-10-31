@@ -82,6 +82,12 @@ The `.env.example` file already contains these local values. `./stop.sh` stops t
 
 For a hosted setup, create a LiveKit Cloud project and use its `wss://` project URL and server API credentials. Keep the API secret on the Django server; the frontend receives only short lived room tokens.
 
+### Live multilingual translation
+
+Live meeting translation uses an Azure Speech resource for streaming speech recognition, multi-language translation, and synthesized translated audio. Set `AZURE_SPEECH_KEY` and `AZURE_SPEECH_REGION` in the root `.env`; the subscription key stays on the Django server, which exchanges it for short-lived Speech tokens. Then the meeting host opens **Translate**, selects the spoken language, and enables translation. Each participant chooses their own listening language, subtitles, and translated audio. Original LiveKit audio remains unchanged for participants who do not enable translated audio.
+
+The available source and listening languages are English, Urdu, Chinese (Simplified), Arabic, Hindi, French, Spanish, German, Japanese, and Portuguese. Translation controls remain visible if the provider is not configured, with an actionable setup message when the host tries to enable the feature.
+
 ### Optional Redis
 
 Redis is included as a local Docker Compose service:
@@ -110,6 +116,7 @@ Copy `.env.example` to `.env` if you are configuring services manually. `./start
 | `DATABASE_URL` | `sqlite:///db.sqlite3` locally or a PostgreSQL URL |
 | `CHANNEL_REDIS_URL` | Redis URL for shared production Channels groups; blank uses in-memory channels |
 | `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | LiveKit server URL and server side credentials |
+| `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION` | Azure Speech resource credentials for live multilingual meeting translation |
 | `MAX_UPLOAD_MB` | Per file upload limit; defaults to 25 MB |
 | `EMAIL_*`, `DEFAULT_FROM_EMAIL` | Django email backend settings |
 | `AWS_STORAGE_BUCKET_NAME` | Enables private S3 compatible storage when configured |
