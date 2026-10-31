@@ -1,0 +1,8 @@
+{
+  "name": "connectx",
+  "private": true,
+  "scripts": {
+    "dev": "BACKEND_PORT=${BACKEND_PORT:-8004} FRONTEND_PORT=${FRONTEND_PORT:-5174} ./start.sh",
+    "stop": "./stop.sh"
+  }
+}
